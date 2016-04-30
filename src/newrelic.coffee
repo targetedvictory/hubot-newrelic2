@@ -14,6 +14,7 @@
 #   hubot newrelic apps name <filter_string> - Returns a filtered list of applications
 #   hubot newrelic apps instances <app_id> - Returns a list of one application's instances
 #   hubot newrelic apps hosts <app_id> - Returns a list of one application's hosts
+#   hubot newrelic apps hostsbyname <filter_string> - Returns list of hosts for matching applications
 #   hubot newrelic ktrans - Lists stats for all key transactions from New Relic
 #   hubot newrelic ktrans id <ktrans_id> - Returns a single key transaction
 #   hubot newrelic servers - Returns statistics for all servers from New Relic
@@ -44,7 +45,6 @@ plugin = (robot) ->
   config = {}
   # knownApps is an array, not an object, in case ids/names are repeated across accounts
   knownApps = []
-  console.log(accounts)
 
   switch robot.adapterName
     when "hipchat"
@@ -58,25 +58,18 @@ plugin = (robot) ->
     for app in applications
       knownApps.push { id: app.id, name: app.name, account: account }
 
-  appAccountsById = (id, cb) ->
+  accountsByAppId = (id, cb) ->
     matches = (app for app in knownApps when app.id is id)
     for app in matches
       cb(app.account)
 
-  appAccountsByPattern = (pattern, cb) ->
+  accountsByPattern = (pattern, cb) ->
     env_pattern = pattern.split('-').join('_').toLowerCase()
-    matches = (account for account in accounts when env_pattern.search(pattern) >= 0)
+    matches = (account for pattern, account of accounts when env_pattern.search(pattern) >= 0)
     if matches.length > 0
       cb(match) for match in matches
     else
       cb(accounts._default)
-
-  getAccount = (pattern) ->
-    env_pattern = pattern.split('-').join('_').toLowerCase()
-    for key, value of accounts
-      if env_pattern.search(key) >= 0
-        return value
-    return accounts._default
 
   request = (account, path, data, cb) ->
     if account.accountType == 'lite'
@@ -85,11 +78,13 @@ plugin = (robot) ->
       requestToProAccount account, path, data, cb
 
   requestAll = (path, data, cb) ->
-    for pattern, account of accounts
-      request account, path, data, cb
+    request(account, path, data, cb) for pattern, account of accounts
+
+  requestAllPro = (path, data, cb) ->
+    request(account, path, data, cb) for pattern, account of accounts when account.accountType is 'pro'
 
   requestToPattern = (pattern, path, data, cb) ->
-    appAccountsByPattern pattern, (account) ->
+    accountsByPattern pattern, (account) ->
       request account, path, data, cb
 
   requestToLiteAccount = (account, path, cb) ->
@@ -125,6 +120,12 @@ plugin = (robot) ->
     else
       applications
 
+  filterUsers = (account, users, pattern) ->
+    if account.accountType == 'lite'
+      (user for user in users when user.email.search(pattern) >= 0)
+    else
+      users
+
   # Initialize apps table at start
   requestAll 'applications.json', '', (err, json, account) ->
     if err
@@ -141,7 +142,7 @@ Note: In these commands you can shorten newrelic to nr.\n
 #{robot.name} newrelic apps name <filter_string>\n
 #{robot.name} newrelic apps instances <app_id>\n
 #{robot.name} newrelic apps hosts <app_id>\n
-#{robot.name} newrelic apps hosts <filter_string>\n
+#{robot.name} newrelic apps hostsbyname <filter_string>\n
 #{robot.name} newrelic ktrans\n
 #{robot.name} newrelic ktrans id <ktrans_id>\n
 #{robot.name} newrelic servers\n
@@ -176,24 +177,25 @@ Note: In these commands you can shorten newrelic to nr.\n
           msg.send "No applications in account #{account.pattern} with errors."
 
   robot.respond /(newrelic|nr) ktrans$/i, (msg) ->
-    requestAll 'key_transactions.json', '', (err, json) ->
+    requestAllPro 'key_transactions.json', '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
         msg.send plugin.ktrans json.key_transactions, config
 
   robot.respond /(newrelic|nr) servers$/i, (msg) ->
-    requestAll 'servers.json', '', (err, json) ->
+    requestAll 'servers.json', '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
         msg.send plugin.servers json.servers, config
 
   robot.respond /(newrelic|nr) users$/i, (msg) ->
-    request 'users.json', '', (err, json) ->
+    requestAll 'users.json', '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
+        msg.send "Account: #{account.pattern}"
         msg.send plugin.users json.users, config
 
   robot.respond /(newrelic|nr) apps name ([\s\S]+)$/i, (msg) ->
@@ -208,42 +210,55 @@ Note: In these commands you can shorten newrelic to nr.\n
   robot.respond /(newrelic|nr) apps hosts ([0-9]+)$/i, (msg) ->
     id = parseInt(msg.match[2].trim())
     # use lookup table to decide which account to use for the id
-    appAccountsById id, (account) ->
-      request account, "applications/#{msg.match[2]}/hosts.json", '', (err, json) ->
+    accountsByAppId id, (account) ->
+      request account, "applications/#{msg.match[2]}/hosts.json", '', (err, json, account) ->
         if err
           msg.send "Failed: #{err.message}"
         else
           msg.send plugin.hosts json.application_hosts, config
 
-  robot.respond /(newrelic|nr) apps hostsbyname (\w+)$/i, (msg) ->
-    pattern = msg.match[2]
+  robot.respond /(newrelic|nr) apps hostsbyname (.+)$/i, (msg) ->
+    pattern = msg.match[2].trim()
     data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(pattern)
-    appAccountsByPattern pattern, (account) ->
-
-    requestToPattern pattern, 'applications.json', data, (err, json, account) ->
-      if err
-        msg.send "Failed: #{err.message}"
-      else
-        # this is really inefficient b/c we look up the key again, refactor
-        # build a lookup table when we start?
-        apps = if lite then (app for app in json.applications when app.name.search(pattern) >= 0) else json.applications
-        for app in apps
-          request pattern, "applications/#{app.id}/hosts.json", '', (err, json) ->
-            if err
-              msg.send "Failed: #{err.message}"
-            else
-              msg.send plugin.hosts json.application_hosts, config
+    accountsByPattern pattern, (account) ->
+      request account, 'applications.json', data, (err, json, account) ->
+        if err
+          msg.send "Failed: #{err.message}"
+        else
+          for app in filterApps(account, json.applications, pattern)
+            request account, "applications/#{app.id}/hosts.json", '', (err, json, account) ->
+              if err
+                msg.send "Failed: #{err.message}"
+              else
+                msg.send plugin.hosts json.application_hosts, config
 
   robot.respond /(newrelic|nr) apps instances ([0-9]+)$/i, (msg) ->
-    # referencing app by id works only on default account for now
-    request "applications/#{msg.match[2]}/instances.json", '', (err, json) ->
-      if err
-        msg.send "Failed: #{err.message}"
-      else
-        msg.send plugin.instances json.application_instances, config
+    id = parseInt(msg.match[2].trim())
+    accountsByAppId id, (account) ->
+      request account, "applications/#{msg.match[2]}/instances.json", '', (err, json, account) ->
+        if err
+          msg.send "Failed: #{err.message}"
+        else
+          msg.send plugin.instances json.application_instances, config
+
+  robot.respond /(newrelic|nr) apps instancesbyname (.+)$/i, (msg) ->
+    pattern = msg.match[2].trim()
+    data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(pattern)
+    accountsByPattern pattern, (account) ->
+      request account, 'applications.json', data, (err, json, account) ->
+        if err
+          msg.send "Failed: #{err.message}"
+        else
+          for app in filterApps(account, json.applications, pattern)
+            request account, "applications/#{app.id}/instances.json", '', (err, json, account) ->
+              if err
+                msg.send "Failed: #{err.message}"
+              else
+                msg.send plugin.hosts json.application_instances, config
 
   robot.respond /(newrelic|nr) ktrans id ([0-9]+)$/i, (msg) ->
-    request "key_transactions/#{msg.match[2]}.json", '', (err, json) ->
+    id = parseInt(msg.match[2].trim())
+    requestAllPro "key_transactions/#{msg.match[2]}.json", '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
@@ -251,19 +266,22 @@ Note: In these commands you can shorten newrelic to nr.\n
 
   robot.respond /(newrelic|nr) servers name ([a-zA-Z0-9\-.]+)$/i, (msg) ->
     data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(msg.match[2])
-    request 'servers.json', data, (err, json) ->
+    # TODO: name filtering for servers on lite accounts
+    requestAllPro 'servers.json', data, (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
         msg.send plugin.servers json.servers, config
 
   robot.respond /(newrelic|nr) users email ([a-zA-Z0-9.@]+)$/i, (msg) ->
-    data = encodeURIComponent('filter[email]') + '=' +  encodeURIComponent(msg.match[2])
-    request 'users.json', data, (err, json) ->
+    pattern = msg.match[2].trim()
+    data = encodeURIComponent('filter[email]') + '=' +  encodeURIComponent(pattern)
+    requestAll 'users.json', data, (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
-        msg.send plugin.users json.users, config
+        msg.send "Account: #{account.pattern}"
+        msg.send plugin.users filterUsers(account, json.users, pattern), config
 
 plugin.apps = (apps, opts = {}) ->
   up = opts.up || "UP"
