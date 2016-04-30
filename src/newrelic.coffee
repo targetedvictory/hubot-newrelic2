@@ -13,6 +13,7 @@
 #   hubot newrelic apps errors - Returns statistics for applications with errors from New Relic
 #   hubot newrelic apps name <filter_string> - Returns a filtered list of applications
 #   hubot newrelic apps instances <app_id> - Returns a list of one application's instances
+#   hubot newrelic apps instancesbyname <filter_string> - Returns list of instances for matching applications
 #   hubot newrelic apps hosts <app_id> - Returns a list of one application's hosts
 #   hubot newrelic apps hostsbyname <filter_string> - Returns list of hosts for matching applications
 #   hubot newrelic ktrans - Lists stats for all key transactions from New Relic
@@ -141,6 +142,7 @@ Note: In these commands you can shorten newrelic to nr.\n
 #{robot.name} newrelic apps errors\n
 #{robot.name} newrelic apps name <filter_string>\n
 #{robot.name} newrelic apps instances <app_id>\n
+#{robot.name} newrelic apps instancesbyname <filter_string>\n
 #{robot.name} newrelic apps hosts <app_id>\n
 #{robot.name} newrelic apps hostsbyname <filter_string>\n
 #{robot.name} newrelic ktrans\n

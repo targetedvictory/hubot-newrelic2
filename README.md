@@ -48,6 +48,16 @@ hubot newrelic apps instances <app_id>
 hubot newrelic apps hosts <app_id>
 ```
 
+* List of matching applications' instances
+```
+hubot newrelic apps instancesbyname <filter_string>
+```
+
+* List of matching applications' hosts
+```
+hubot newrelic apps hostsbyname <filter_string>
+```
+
 #### Key Transaction Related Commands
 
 * List of all key transactions
