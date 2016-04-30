@@ -16,10 +16,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/statianzo/hubot-newrelic2.git"
+    "url": "https://github.com/targetedvictory/hubot-newrelic2.git"
   },
   "bugs": {
-    "url": "https://github.com/statianzo/hubot-newrelic2/issues"
+    "url": "https://github.com/targetedvictory/hubot-newrelic2/issues"
   },
   "dependencies": {
     "coffee-script": "^1.8.0"

@@ -34,52 +34,67 @@ plugin = (robot) ->
   # Support multiple API keys by setting additional environment
   # variables of the form HUBOT_NEWRELIC_API_KEY_<app name pattern>,
   # with app name hyphens converted to underscores
-  apiKeys = {}
-  accountTypes = {}
-  apiKeys["_default"] = defaultApiKey
-  for key, value of process.env
+  accounts = {}
+  accounts['_default'] = { pattern: '_default', apiKey: defaultApiKey, accountType: 'pro' }
+  for own key, value of process.env
     if match = key.match(/HUBOT_NEWRELIC_API_KEY_(.+)/)
-      apiKeys[match[1]] = value
-    else if match = key.match(/HUBOT_NEWRELIC_ACCOUNT_TYPE_(.+)/)
-      accountTypes[match[1]] = value
+      accounts[match[1]] = { apiKey: value, accountType: process.env["HUBOT_NEWRELIC_ACCOUNT_TYPE_#{match[1]}"], pattern: match[1].toLowerCase() }
   apiHost = process.env.HUBOT_NEWRELIC_API_HOST or 'api.newrelic.com'
   apiBaseUrl = "https://#{apiHost}/v2/"
   config = {}
+  # knownApps is an array, not an object, in case ids/names are repeated across accounts
+  knownApps = []
+  console.log(accounts)
 
   switch robot.adapterName
     when "hipchat"
       config.up = '(continue)'
       config.down = '(failed)'
 
-  getApiKey = (pattern) ->
-    env_pattern = pattern.split('-').join('_')
-    for key, value of apiKeys
-      if env_pattern.search(key) >= 0
-        return value
-    return defaultApiKey
+  resetApps = () ->
+    knownApps = []
 
-  getAccountType = (pattern) ->
-    env_pattern = pattern.split('-').join('_')
-    for key, value of accountTypes
+  addApps = (applications, account) ->
+    for app in applications
+      knownApps.push { id: app.id, name: app.name, account: account }
+
+  appAccountsById = (id, cb) ->
+    matches = (app for app in knownApps when app.id is id)
+    for app in matches
+      cb(app.account)
+
+  appAccountsByPattern = (pattern, cb) ->
+    env_pattern = pattern.split('-').join('_').toLowerCase()
+    matches = (account for account in accounts when env_pattern.search(pattern) >= 0)
+    if matches.length > 0
+      cb(match) for match in matches
+    else
+      cb(accounts._default)
+
+  getAccount = (pattern) ->
+    env_pattern = pattern.split('-').join('_').toLowerCase()
+    for key, value of accounts
       if env_pattern.search(key) >= 0
         return value
-    return 'pro'
+    return accounts._default
+
+  request = (account, path, data, cb) ->
+    if account.accountType == 'lite'
+      requestToLiteAccount account, path, cb
+    else
+      requestToProAccount account, path, data, cb
 
   requestAll = (path, data, cb) ->
-    for pattern, apiKey of apiKeys
-      requestToAccount apiKey, path, data, cb
+    for pattern, account of accounts
+      request account, path, data, cb
 
-  request = (pattern, path, data, cb) ->
-    apiKey = getApiKey(pattern)
-    accountType = getAccountType(pattern)
-    if accountType == 'lite'
-      requestToLiteAccount apiKey, path, cb
-    else
-      requestToAccount apiKey, path, data, cb
+  requestToPattern = (pattern, path, data, cb) ->
+    appAccountsByPattern pattern, (account) ->
+      request account, path, data, cb
 
-  requestToLiteAccount = (apiKey, path, cb) ->
+  requestToLiteAccount = (account, path, cb) ->
     robot.http(apiBaseUrl + path)
-      .header('X-Api-Key', apiKey)
+      .header('X-Api-Key', account.apiKey)
       .get() (err, res, body) ->
         if err
           cb(err)
@@ -88,11 +103,11 @@ plugin = (robot) ->
           if json.error
             cb(new Error(body))
           else
-            cb(null, json, true)
+            cb(null, json, account)
 
-  requestToAccount = (apiKey, path, data, cb) ->
+  requestToProAccount = (account, path, data, cb) ->
     robot.http(apiBaseUrl + path)
-      .header('X-Api-Key', apiKey)
+      .header('X-Api-Key', account.apiKey)
       .header("Content-Type","application/x-www-form-urlencoded")
       .post(data) (err, res, body) ->
         if err
@@ -102,7 +117,20 @@ plugin = (robot) ->
           if json.error
             cb(new Error(body))
           else
-            cb(null, json, false)
+            cb(null, json, account)
+
+  filterApps = (account, applications, pattern) ->
+    if account.accountType == 'lite'
+      (app for app in applications when app.name.search(pattern) >= 0)
+    else
+      applications
+
+  # Initialize apps table at start
+  requestAll 'applications.json', '', (err, json, account) ->
+    if err
+      console.log("Error initialing apps table: #{err}")
+    else
+      addApps json.applications, account
 
   robot.respond /(newrelic|nr) help$/i, (msg) ->
     msg.send "
@@ -113,6 +141,7 @@ Note: In these commands you can shorten newrelic to nr.\n
 #{robot.name} newrelic apps name <filter_string>\n
 #{robot.name} newrelic apps instances <app_id>\n
 #{robot.name} newrelic apps hosts <app_id>\n
+#{robot.name} newrelic apps hosts <filter_string>\n
 #{robot.name} newrelic ktrans\n
 #{robot.name} newrelic ktrans id <ktrans_id>\n
 #{robot.name} newrelic servers\n
@@ -121,14 +150,22 @@ Note: In these commands you can shorten newrelic to nr.\n
 #{robot.name} newrelic user email <filter_string>"
 
   robot.respond /(newrelic|nr) apps$/i, (msg) ->
-    requestAll 'applications.json', '', (err, json) ->
+    # rebuild the app lookup table when issuing this command
+    resetApps()
+    requestAll 'applications.json', '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
+        addApps json.applications, account
         msg.send plugin.apps json.applications, config
 
+  robot.respond /(newrelic|nr) apps cache$/i, (msg) ->
+    # hidden command: show app lookup table; not api keys though
+    for app in knownApps
+      msg.send "id:#{app.id} name:#{app.name} acctType:#{app.account.accountType} acctPattern:#{app.account.pattern}"
+
   robot.respond /(newrelic|nr) apps errors$/i, (msg) ->
-    request 'applications.json', '', (err, json) ->
+    requestAll 'applications.json', '', (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
@@ -136,17 +173,17 @@ Note: In these commands you can shorten newrelic to nr.\n
         if result.length > 0
           msg.send plugin.apps result, config
         else
-          msg.send "No applications with errors."
+          msg.send "No applications in account #{account.pattern} with errors."
 
   robot.respond /(newrelic|nr) ktrans$/i, (msg) ->
-    request 'key_transactions.json', '', (err, json) ->
+    requestAll 'key_transactions.json', '', (err, json) ->
       if err
         msg.send "Failed: #{err.message}"
       else
         msg.send plugin.ktrans json.key_transactions, config
 
   robot.respond /(newrelic|nr) servers$/i, (msg) ->
-    request 'servers.json', '', (err, json) ->
+    requestAll 'servers.json', '', (err, json) ->
       if err
         msg.send "Failed: #{err.message}"
       else
@@ -162,23 +199,43 @@ Note: In these commands you can shorten newrelic to nr.\n
   robot.respond /(newrelic|nr) apps name ([\s\S]+)$/i, (msg) ->
     pattern = msg.match[2]
     data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(pattern)
-    request pattern, 'applications.json', data, (err, json, lite) ->
+    requestToPattern pattern, 'applications.json', data, (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
-      else if lite
-        # Filter app names here
-        msg.send plugin.apps (app for app in json.applications when app.name.search(pattern) >= 0), config
       else
-        msg.send plugin.apps json.applications, config
+        msg.send plugin.apps filterApps(account, json.applications, pattern), config
 
   robot.respond /(newrelic|nr) apps hosts ([0-9]+)$/i, (msg) ->
-    request "applications/#{msg.match[2]}/hosts.json", '', (err, json) ->
+    id = parseInt(msg.match[2].trim())
+    # use lookup table to decide which account to use for the id
+    appAccountsById id, (account) ->
+      request account, "applications/#{msg.match[2]}/hosts.json", '', (err, json) ->
+        if err
+          msg.send "Failed: #{err.message}"
+        else
+          msg.send plugin.hosts json.application_hosts, config
+
+  robot.respond /(newrelic|nr) apps hostsbyname (\w+)$/i, (msg) ->
+    pattern = msg.match[2]
+    data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(pattern)
+    appAccountsByPattern pattern, (account) ->
+
+    requestToPattern pattern, 'applications.json', data, (err, json, account) ->
       if err
         msg.send "Failed: #{err.message}"
       else
-        msg.send plugin.hosts json.application_hosts, config
+        # this is really inefficient b/c we look up the key again, refactor
+        # build a lookup table when we start?
+        apps = if lite then (app for app in json.applications when app.name.search(pattern) >= 0) else json.applications
+        for app in apps
+          request pattern, "applications/#{app.id}/hosts.json", '', (err, json) ->
+            if err
+              msg.send "Failed: #{err.message}"
+            else
+              msg.send plugin.hosts json.application_hosts, config
 
   robot.respond /(newrelic|nr) apps instances ([0-9]+)$/i, (msg) ->
+    # referencing app by id works only on default account for now
     request "applications/#{msg.match[2]}/instances.json", '', (err, json) ->
       if err
         msg.send "Failed: #{err.message}"
