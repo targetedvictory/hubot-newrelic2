@@ -26,10 +26,22 @@
 #
 # Contributors:
 #   spkane
+#   ptshrdn
 #
 
 plugin = (robot) ->
-  apiKey = process.env.HUBOT_NEWRELIC_API_KEY
+  defaultApiKey = process.env.HUBOT_NEWRELIC_API_KEY
+  # Support multiple API keys by setting additional environment
+  # variables of the form HUBOT_NEWRELIC_API_KEY_<app name pattern>,
+  # with app name hyphens converted to underscores
+  apiKeys = {}
+  accountTypes = {}
+  apiKeys["_default"] = defaultApiKey
+  for key, value of process.env
+    if match = key.match(/HUBOT_NEWRELIC_API_KEY_(.+)/)
+      apiKeys[match[1]] = value
+    else if match = key.match(/HUBOT_NEWRELIC_ACCOUNT_TYPE_(.+)/)
+      accountTypes[match[1]] = value
   apiHost = process.env.HUBOT_NEWRELIC_API_HOST or 'api.newrelic.com'
   apiBaseUrl = "https://#{apiHost}/v2/"
   config = {}
@@ -39,7 +51,46 @@ plugin = (robot) ->
       config.up = '(continue)'
       config.down = '(failed)'
 
-  request = (path, data, cb) ->
+  getApiKey = (pattern) ->
+    env_pattern = pattern.split('-').join('_')
+    for key, value of apiKeys
+      if env_pattern.search(key) >= 0
+        return value
+    return defaultApiKey
+
+  getAccountType = (pattern) ->
+    env_pattern = pattern.split('-').join('_')
+    for key, value of accountTypes
+      if env_pattern.search(key) >= 0
+        return value
+    return 'pro'
+
+  requestAll = (path, data, cb) ->
+    for pattern, apiKey of apiKeys
+      requestToAccount apiKey, path, data, cb
+
+  request = (pattern, path, data, cb) ->
+    apiKey = getApiKey(pattern)
+    accountType = getAccountType(pattern)
+    if accountType == 'lite'
+      requestToLiteAccount apiKey, path, cb
+    else
+      requestToAccount apiKey, path, data, cb
+
+  requestToLiteAccount = (apiKey, path, cb) ->
+    robot.http(apiBaseUrl + path)
+      .header('X-Api-Key', apiKey)
+      .get() (err, res, body) ->
+        if err
+          cb(err)
+        else
+          json = JSON.parse(body)
+          if json.error
+            cb(new Error(body))
+          else
+            cb(null, json, true)
+
+  requestToAccount = (apiKey, path, data, cb) ->
     robot.http(apiBaseUrl + path)
       .header('X-Api-Key', apiKey)
       .header("Content-Type","application/x-www-form-urlencoded")
@@ -51,7 +102,7 @@ plugin = (robot) ->
           if json.error
             cb(new Error(body))
           else
-            cb(null, json)
+            cb(null, json, false)
 
   robot.respond /(newrelic|nr) help$/i, (msg) ->
     msg.send "
@@ -70,7 +121,7 @@ Note: In these commands you can shorten newrelic to nr.\n
 #{robot.name} newrelic user email <filter_string>"
 
   robot.respond /(newrelic|nr) apps$/i, (msg) ->
-    request 'applications.json', '', (err, json) ->
+    requestAll 'applications.json', '', (err, json) ->
       if err
         msg.send "Failed: #{err.message}"
       else
@@ -109,10 +160,14 @@ Note: In these commands you can shorten newrelic to nr.\n
         msg.send plugin.users json.users, config
 
   robot.respond /(newrelic|nr) apps name ([\s\S]+)$/i, (msg) ->
-    data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(msg.match[2])
-    request 'applications.json', data, (err, json) ->
+    pattern = msg.match[2]
+    data = encodeURIComponent('filter[name]') + '=' +  encodeURIComponent(pattern)
+    request pattern, 'applications.json', data, (err, json, lite) ->
       if err
         msg.send "Failed: #{err.message}"
+      else if lite
+        # Filter app names here
+        msg.send plugin.apps (app for app in json.applications when app.name.search(pattern) >= 0), config
       else
         msg.send plugin.apps json.applications, config
 
@@ -159,7 +214,8 @@ plugin.apps = (apps, opts = {}) ->
 
   lines = apps.map (a) ->
     line = []
-    summary = a.application_summary || {}
+    app_summary = a.application_summary || {}
+    usr_summary = a.end_user_summary || {}
 
     if a.reporting
       line.push up
@@ -168,14 +224,32 @@ plugin.apps = (apps, opts = {}) ->
 
     line.push "#{a.name} (#{a.id})"
 
-    if isFinite(summary.response_time)
-      line.push "Res:#{summary.response_time}ms"
+    if isFinite(app_summary.response_time)
+      line.push "SrvRes:#{app_summary.response_time}ms"
 
-    if isFinite(summary.throughput)
-      line.push "RPM:#{summary.throughput}"
+    if isFinite(app_summary.throughput)
+      line.push "SrvRPM:#{app_summary.throughput}"
 
-    if isFinite(summary.error_rate)
-      line.push "Err:#{summary.error_rate}%"
+    if isFinite(app_summary.apdex_score)
+      line.push "SrvApdex:#{app_summary.apdex_score}"
+
+    if isFinite(app_summary.error_rate)
+      line.push "Err:#{app_summary.error_rate}%"
+
+    if isFinite(usr_summary.response_time)
+      line.push "UsrRes:#{usr_summary.response_time}s"
+
+    if isFinite(usr_summary.throughput)
+      line.push "UsrRPM:#{usr_summary.throughput}"
+
+    if isFinite(usr_summary.apdex_score)
+      line.push "UsrApdex:#{usr_summary.apdex_score}"
+
+    if isFinite(app_summary.host_count)
+      line.push "Hosts:#{app_summary.host_count}"
+
+    if isFinite(app_summary.instance_count)
+      line.push "Instances:#{app_summary.instance_count}"
 
     line.join "  "
 
