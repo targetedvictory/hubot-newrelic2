@@ -15,7 +15,7 @@ npm install --save hubot-newrelic2
 * Set `HUBOT_NEWRELIC_API_KEY` to your default New Relic API key
 * Set `HUBOT_NEWRELIC_API_HOST` to something other than `api.newrelic.com` if required
 * Set `HUBOT_NEWRELIC_API_KEY_<app name pattern>` to a New Relic API key for apps matching that pattern
-* Set `HUBOT_NEWRELIC_ACCOUNT_TYPE_<app name pattern>` to lite if apps matching that pattern are in a Lite account (and thus don't have access to the *name* filter via the API)
+* Set `HUBOT_NEWRELIC_ACCOUNT_TYPE_<app name pattern>` to _lite_ if apps matching that pattern are in a Lite account (and thus don't have access to the *name* filter via the API)
 
 ## Usage
 
